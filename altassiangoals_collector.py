@@ -12,6 +12,8 @@ except ImportError:
     # If dotenv is not installed, print a helpful message
     print("[INFO] python-dotenv not installed. Install it with: pip install python-dotenv if you want to load .env files.")
 
+from playwright.sync_api import sync_playwright
+
 def get_atlassian_goal_data(goal_id, api_token=None, email=None):
     """
     Retrieve goal data from Atlassian, including goals, teams, contributors, and Jira issues.
@@ -114,71 +116,106 @@ def extract_goal_id_from_url(url):
         return match.group(1)
     return url  # fallback: return as-is if not a URL
 
-def get_project_info(project_key, api_token=None, email=None):
-    """Fetch Jira project info using the Jira Cloud REST API."""
-    if not api_token:
-        api_token = os.environ.get('ATLASSIAN_API_TOKEN')
-    if not email:
-        email = os.environ.get('ATLASSIAN_EMAIL')
-    if not api_token or not email:
-        raise ValueError("API token and email are required. Provide them as parameters or set as environment variables.")
+def get_atlassian_project_info(project_id, org_id, site_id, api_token=None, email=None):
+    base_url = "https://api.atlassian.com"
+    url = f"{base_url}/goals/1.0/organizations/{org_id}/sites/{site_id}/projects/{project_id}"
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
-    url = f"https://natwest.atlassian.net/rest/api/3/project/{project_key}"
-    response = requests.get(url, auth=HTTPBasicAuth(email, api_token), headers=headers)
+    if not api_token:
+        api_token = os.environ.get('ATLASSIAN_API_TOKEN')
+    if not email:
+        email = os.environ.get('ATLASSIAN_EMAIL')
+    auth = HTTPBasicAuth(email, api_token)
+    response = requests.get(url, auth=auth, headers=headers)
     if response.status_code == 404:
-        print(f"[ERROR] Project '{project_key}' not found at {url}")
+        print(f"[ERROR] Project '{project_id}' not found at {url}")
         return None
     response.raise_for_status()
     return response.json()
 
-def get_goals_for_project(project_key, org_id, site_id, api_token=None, email=None):
-    """Fetch all goals associated with a project (if supported by your Atlassian instance)."""
-    if not api_token:
-        api_token = os.environ.get('ATLASSIAN_API_TOKEN')
-    if not email:
-        email = os.environ.get('ATLASSIAN_EMAIL')
-    if not api_token or not email:
-        raise ValueError("API token and email are required. Provide them as parameters or set as environment variables.")
+def get_goals_for_project(project_id, org_id, site_id, api_token=None, email=None):
+    base_url = "https://api.atlassian.com"
+    url = f"{base_url}/goals/1.0/organizations/{org_id}/sites/{site_id}/projects/{project_id}/goals"
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
-    # This endpoint may need to be adjusted for your instance
-    url = f"https://api.atlassian.com/goals/1.0/organizations/{org_id}/sites/{site_id}/projects/{project_key}/goals"
-    response = requests.get(url, auth=HTTPBasicAuth(email, api_token), headers=headers)
+    if not api_token:
+        api_token = os.environ.get('ATLASSIAN_API_TOKEN')
+    if not email:
+        email = os.environ.get('ATLASSIAN_EMAIL')
+    auth = HTTPBasicAuth(email, api_token)
+    response = requests.get(url, auth=auth, headers=headers)
     if response.status_code == 404:
-        print(f"[ERROR] No goals found for project '{project_key}' at {url}")
+        print(f"[ERROR] No goals found for project '{project_id}' at {url}")
         return []
     response.raise_for_status()
     return response.json().get('values', [])
 
+def extract_goals_from_sidebar(url, email=None, password=None):
+    if not email:
+        email = os.environ.get('ATLASSIAN_EMAIL')
+    if not password:
+        password = os.environ.get('ATLASSIAN_PASSWORD')
+    if not email or not password:
+        raise ValueError("Email and password are required. Provide them as parameters or set as environment variables in .env (ATLASSIAN_EMAIL, ATLASSIAN_PASSWORD).")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        page = browser.new_page()
+        page.goto(url)
+
+        # --- Login if needed ---
+        if "id.atlassian.com/login" in page.url:
+            print("Logging in to Atlassian...")
+            page.fill('input[type="email"]', email)
+            page.click('button[type="submit"]')
+            page.wait_for_timeout(2000)
+            page.wait_for_selector('input[type="password"]', timeout=15000)
+            page.fill('input[type="password"]', password)
+            page.click('button[type="submit"]')
+            page.wait_for_url(lambda url: "project" in url, timeout=60000)
+
+        # Now wait for the sidebar to load
+        page.wait_for_selector('aside.sc-EHOje.iBaHwQ', timeout=30000)
+
+        # Extract all text from the sidebar
+        sidebar = page.query_selector('aside.sc-EHOje.iBaHwQ')
+        sidebar_text = sidebar.inner_text()
+        print("Sidebar text:\n", sidebar_text)
+
+        browser.close()
+
+# Usage
+extract_goals_from_sidebar(
+    url="https://home.atlassian.com/o/b9427kk9-4caa-1ka6-7jj5-c777aa87a1aa/s/66dac687-c07e-4919-9fec-8ed98e6c14ec/project/NATWE-129/about"
+)
+
 if __name__ == "__main__":
     # Accept a project key or project URL from user input
-    project_input = input("Enter a Jira project key or project URL: ")
-    # Extract project key from URL if needed
+    project_input = input("Enter an Atlassian project key or project URL: ")
+    # Extract project_id from URL if needed
     match = re.search(r'/project/([A-Z0-9-]+)/about', project_input)
     if match:
-        project_key = match.group(1)
+        project_id = match.group(1)
     else:
-        project_key = project_input.strip()
-
-    # Fetch project info
-    project_info = get_project_info(project_key)
-    if not project_info:
-        exit(1)
-    print(f"\nProject: {project_info.get('name', 'N/A')}")
-    print(f"Project Key: {project_info.get('key', 'N/A')}")
-    print(f"Project Description: {project_info.get('description', {}).get('plain', {}).get('value', 'N/A') if isinstance(project_info.get('description'), dict) else project_info.get('description', 'N/A')}")
+        project_id = project_input.strip()
 
     # Set org_id and site_id (hardcoded as before)
     org_id = "b9427kk9-4caa-1ka6-7jj5-c777aa87a1aa"
     site_id = "66dac687-c07e-4919-9fec-8ed98e6c14ec"
 
+    # Fetch project info from Atlassian Goals API
+    project_info = get_atlassian_project_info(project_id, org_id, site_id)
+    if not project_info:
+        exit(1)
+    print(f"\nProject: {project_info.get('name', 'N/A')}")
+    print(f"Project ID: {project_info.get('id', 'N/A')}")
+    print(f"Project Description: {project_info.get('description', 'N/A')}")
+
     # Fetch all goals for the project
-    goals = get_goals_for_project(project_key, org_id, site_id)
+    goals = get_goals_for_project(project_id, org_id, site_id)
     if not goals:
         print("No goals found for this project.")
         exit(0)
